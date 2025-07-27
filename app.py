@@ -18,8 +18,6 @@ def main():
         st.session_state.processed_data = None
     
     # File upload section
-    st.header("1. Upload Files")
-    
     col1, col2 = st.columns(2)
     
     with col1:
@@ -38,10 +36,6 @@ def main():
                     st.session_state.jobstreet_data = pd.read_excel(jobstreet_file)
                 
                 st.success(f"JobStreet file loaded: {len(st.session_state.jobstreet_data)} rows")
-                
-                # Show preview
-                st.write("Preview (first 5 rows):")
-                st.dataframe(st.session_state.jobstreet_data.head())
                 
                 # Validate required columns
                 required_cols = ['Job Title', 'Company', 'Location']
@@ -69,10 +63,6 @@ def main():
                 st.session_state.linkedin_data = pd.read_excel(linkedin_file)
                 st.success(f"LinkedIn file loaded: {len(st.session_state.linkedin_data)} rows")
                 
-                # Show preview
-                st.write("Preview (first 5 rows):")
-                st.dataframe(st.session_state.linkedin_data.head())
-                
                 # Validate Current Company column
                 if 'Current Company' not in st.session_state.linkedin_data.columns:
                     st.error("Missing 'Current Company' column in LinkedIn data")
@@ -85,96 +75,62 @@ def main():
     
     # Process data section
     if st.session_state.jobstreet_data is not None and st.session_state.linkedin_data is not None:
-        st.header("2. Data Analysis")
-        
         # Check if both files have required columns
         jobstreet_valid = all(col in st.session_state.jobstreet_data.columns for col in ['Job Title', 'Company', 'Location'])
         linkedin_valid = 'Current Company' in st.session_state.linkedin_data.columns
         
         if jobstreet_valid and linkedin_valid:
-            # Extract company data
-            jobstreet_companies = extract_jobstreet_companies(st.session_state.jobstreet_data)
-            linkedin_companies = extract_linkedin_companies(st.session_state.linkedin_data)
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("JobStreet Companies")
-                st.write(f"Total unique companies: {len(jobstreet_companies)}")
-                for company, count in jobstreet_companies.items():
-                    st.write(f"• {company}: {count} job(s)")
-            
+            # Center the button
+            col1, col2, col3 = st.columns([1, 2, 1])
             with col2:
-                st.subheader("LinkedIn Companies")
-                st.write(f"Total unique companies: {len(linkedin_companies)}")
-                for company, count in linkedin_companies.items():
-                    st.write(f"• {company}: {count} stakeholder(s)")
-            
-            # Company matching
-            st.header("3. Company Matching")
-            
-            if st.button("Match Companies and Process Data", type="primary"):
-                with st.spinner("Processing data..."):
-                    matches = match_companies(jobstreet_companies, linkedin_companies)
-                    
-                    st.subheader("Company Matches Found:")
-                    if matches:
-                        for jobstreet_company, (linkedin_company, similarity) in matches.items():
-                            linkedin_count = linkedin_companies[linkedin_company]
-                            st.write(f"✅ **{jobstreet_company}** → **{linkedin_company}** ({similarity:.1f}% match)")
-                            st.write(f"   LinkedIn stakeholders: {linkedin_count}")
-                    else:
-                        st.warning("No company matches found.")
-                    
-                    # Process the data
-                    st.session_state.processed_data = process_jobstreet_data(
-                        st.session_state.jobstreet_data, 
-                        matches, 
-                        linkedin_companies
-                    )
-                    
-                    st.success("Data processing completed!")
-        
-        # Display results
-        if st.session_state.processed_data is not None:
-            st.header("4. Results")
-            
-            original_rows = len(st.session_state.jobstreet_data)
-            processed_rows = len(st.session_state.processed_data)
-            added_rows = processed_rows - original_rows
-            
-            st.info(f"Original rows: {original_rows} | Processed rows: {processed_rows} | Added blank rows: {added_rows}")
-            
-            st.subheader("Processed Data Preview")
-            st.dataframe(st.session_state.processed_data.head(20))
-            
-            # Download section
-            st.header("5. Download Results")
-            
-            # Remove any timestamp columns for clean export
-            export_data = st.session_state.processed_data.copy()
-            timestamp_cols = [col for col in export_data.columns if 'extracted' in col.lower() or 'timestamp' in col.lower()]
-            if timestamp_cols:
-                export_data = export_data.drop(columns=timestamp_cols)
-                st.info(f"Removed timestamp columns: {timestamp_cols}")
-            
-            # Create download button
-            @st.cache_data
-            def convert_df_to_excel(df):
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Processed_JobStreet_Data')
-                processed_data = output.getvalue()
-                return processed_data
-            
-            excel_data = convert_df_to_excel(export_data)
-            
-            st.download_button(
-                label="📥 Download Processed Excel File",
-                data=excel_data,
-                file_name="processed_jobstreet_data.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+                if st.button("Mix n Match", type="primary", use_container_width=True):
+                    with st.spinner("Processing data..."):
+                        # Extract company data
+                        jobstreet_companies = extract_jobstreet_companies(st.session_state.jobstreet_data)
+                        linkedin_companies = extract_linkedin_companies(st.session_state.linkedin_data)
+                        
+                        # Match companies
+                        matches = match_companies(jobstreet_companies, linkedin_companies)
+                        
+                        # Process the data
+                        st.session_state.processed_data = process_jobstreet_data(
+                            st.session_state.jobstreet_data, 
+                            matches, 
+                            linkedin_companies
+                        )
+                        
+                        # Remove any timestamp columns for clean export
+                        export_data = st.session_state.processed_data.copy()
+                        timestamp_cols = [col for col in export_data.columns if 'extracted' in col.lower() or 'timestamp' in col.lower()]
+                        if timestamp_cols:
+                            export_data = export_data.drop(columns=timestamp_cols)
+                        
+                        # Create Excel file and auto-download
+                        @st.cache_data
+                        def convert_df_to_excel(df):
+                            output = io.BytesIO()
+                            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                                df.to_excel(writer, index=False, sheet_name='Processed_JobStreet_Data')
+                            processed_data = output.getvalue()
+                            return processed_data
+                        
+                        excel_data = convert_df_to_excel(export_data)
+                        
+                        # Show success message
+                        original_rows = len(st.session_state.jobstreet_data)
+                        processed_rows = len(st.session_state.processed_data)
+                        added_rows = processed_rows - original_rows
+                        
+                        st.success(f"Processing completed! Added {added_rows} blank rows. File ready for download.")
+                        
+                        # Auto-download using JavaScript
+                        st.download_button(
+                            label="📥 Download Processed Excel File",
+                            data=excel_data,
+                            file_name="processed_jobstreet_data.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="auto_download"
+                        )
 
 def extract_jobstreet_companies(df):
     """Extract unique company names and their job counts from JobStreet data"""
