@@ -119,7 +119,7 @@ def main():
                         linkedin_companies = extract_linkedin_companies(st.session_state.linkedin_data)
                         
                         # Match companies with enhanced matching
-                        matches = match_companies_enhanced(jobstreet_companies, linkedin_companies, threshold)
+                        matches = match_companies_semantic(jobstreet_companies, linkedin_companies, threshold)
                         
                         if preview_matches and matches:
                             st.subheader("Company Matches Found")
