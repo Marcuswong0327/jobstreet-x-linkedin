@@ -1,7 +1,8 @@
 streamlit
 pandas
 numpy
+openpyxl
+sentence-transformers
+torch
 fuzzywuzzy
 python-Levenshtein
-openpyxl
-
