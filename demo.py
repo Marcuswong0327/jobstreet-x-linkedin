@@ -164,32 +164,6 @@ def main():
                         with st.expander("Preview Processed Data"):
                             st.dataframe(st.session_state.processed_data.head(20))
 
-def normalize_company_name(company_name):
-    """Normalize company name for better matching"""
-    if pd.isna(company_name) or company_name == '':
-        return ''
-    
-    # Convert to string and strip whitespace
-    name = str(company_name).strip()
-    
-    # Remove common company suffixes and variations
-    suffixes_to_remove = [
-        r'\s+Pty\s+Ltd\.?$', r'\s+Pty\.?\s+Ltd\.?$', r'\s+PTY\s+LTD\.?$',
-        r'\s+Ltd\.?$', r'\s+LTD\.?$', r'\s+Limited\.?$', r'\s+LIMITED\.?$',
-        r'\s+Inc\.?$', r'\s+INC\.?$', r'\s+Incorporated\.?$', r'\s+INCORPORATED\.?$',
-        r'\s+Corp\.?$', r'\s+CORP\.?$', r'\s+Corporation\.?$', r'\s+CORPORATION\.?$',
-        r'\s+Co\.?$', r'\s+CO\.?$', r'\s+Company\.?$', r'\s+COMPANY\.?$',
-        r'\s+LLC\.?$', r'\s+L\.L\.C\.?$', r'\s+LLP\.?$', r'\s+L\.L\.P\.?$'
-    ]
-    
-    # Apply suffix removal
-    for suffix_pattern in suffixes_to_remove:
-        name = re.sub(suffix_pattern, '', name, flags=re.IGNORECASE)
-    
-    # Clean up extra whitespace and normalize case
-    name = ' '.join(name.split()).strip()
-    
-    return name
 
 def extract_jobstreet_companies(df):
     """Extract unique company names and their job counts from JobStreet data"""
