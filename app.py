@@ -1,10 +1,26 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from fuzzywuzzy import fuzz, process
 import io
 import re
 from collections import Counter
+
+# Try to import optional dependencies
+try:
+    from fuzzywuzzy import fuzz, process
+    FUZZYWUZZY_AVAILABLE = True
+except ImportError:
+    FUZZYWUZZY_AVAILABLE = False
+
+try:
+    from sentence_transformers import SentenceTransformer, util
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+
+if not FUZZYWUZZY_AVAILABLE and not SENTENCE_TRANSFORMERS_AVAILABLE:
+    st.warning("⚠️ Advanced matching libraries not available. Using basic string matching.")
+
 
 def main():
     st.title("JobStreet & LinkedIn Company Data Matcher")
@@ -162,32 +178,140 @@ def main():
                         with st.expander("Preview Processed Data"):
                             st.dataframe(st.session_state.processed_data.head(20))
 
+
+def apply_duplicate_blanking(df):
+    """
+    Apply duplicate blanking logic for consecutive rows with identical job title, company, and location.
+    Only the first occurrence in each group will show the values, subsequent rows will be blank.
+    """
+    if df.empty:
+        return df
+    
+    # Create a copy to avoid modifying the original dataframe
+    result_df = df.copy()
+    
+    # Columns to apply blanking logic
+    blank_columns = ['Job Title', 'Company', 'Location']
+    
+    # Ensure all columns exist
+    for col in blank_columns:
+        if col not in result_df.columns:
+            continue
+    
+    # Create a grouping key based on job title, company, and location
+    grouping_columns = [col for col in blank_columns if col in result_df.columns]
+    
+    if not grouping_columns:
+        return result_df
+    
+    # Fill NaN values temporarily for grouping (will restore later)
+    temp_df = result_df.copy()
+    for col in grouping_columns:
+        temp_df[col] = temp_df[col].fillna('__TEMP_NAN__')
+    
+    # Create groups based on consecutive identical combinations
+    current_group = None
+    group_start_idx = None
+    
+    for idx in range(len(temp_df)):
+        # Create current row identifier
+        current_values = tuple(temp_df.iloc[idx][col] for col in grouping_columns)
+        
+        if current_group is None:
+            # First row - always keep values
+            current_group = current_values
+            group_start_idx = idx
+        elif current_values == current_group:
+            # Same group - blank the values for this row
+            for col in grouping_columns:
+                if col in result_df.columns:
+                    result_df.at[result_df.index[idx], col] = ''
+        else:
+            # New group - keep values and update tracking
+            current_group = current_values
+            group_start_idx = idx
+    
+    # Restore original NaN values where they existed
+    for col in grouping_columns:
+        if col in result_df.columns:
+            # Find original NaN positions
+            original_nans = df[col].isna()
+            # Set them back to NaN in result (but only for first occurrence in each group)
+            for idx in range(len(result_df)):
+                if original_nans.iloc[idx] and result_df.iloc[idx][col] == '__TEMP_NAN__':
+                    result_df.at[result_df.index[idx], col] = None
+    
+    return result_df
+
+
 def normalize_company_name(company_name):
-    """Normalize company name for better matching"""
+    """Enhanced company name normalization for better semantic matching"""
     if pd.isna(company_name) or company_name == '':
         return ''
     
     # Convert to string and strip whitespace
     name = str(company_name).strip()
     
-    # Remove common company suffixes and variations
+    # Remove common company suffixes and variations (more comprehensive)
     suffixes_to_remove = [
         r'\s+Pty\s+Ltd\.?$', r'\s+Pty\.?\s+Ltd\.?$', r'\s+PTY\s+LTD\.?$',
         r'\s+Ltd\.?$', r'\s+LTD\.?$', r'\s+Limited\.?$', r'\s+LIMITED\.?$',
         r'\s+Inc\.?$', r'\s+INC\.?$', r'\s+Incorporated\.?$', r'\s+INCORPORATED\.?$',
         r'\s+Corp\.?$', r'\s+CORP\.?$', r'\s+Corporation\.?$', r'\s+CORPORATION\.?$',
         r'\s+Co\.?$', r'\s+CO\.?$', r'\s+Company\.?$', r'\s+COMPANY\.?$',
-        r'\s+LLC\.?$', r'\s+L\.L\.C\.?$', r'\s+LLP\.?$', r'\s+L\.L\.P\.?$'
+        r'\s+LLC\.?$', r'\s+L\.L\.C\.?$', r'\s+LLP\.?$', r'\s+L\.L\.P\.?$',
+        r'\s+Group\.?$', r'\s+GROUP\.?$', r'\s+Holdings\.?$', r'\s+HOLDINGS\.?$',
+        r'\s+International\.?$', r'\s+INTERNATIONAL\.?$', r'\s+Global\.?$', r'\s+GLOBAL\.?$'
     ]
     
     # Apply suffix removal
     for suffix_pattern in suffixes_to_remove:
         name = re.sub(suffix_pattern, '', name, flags=re.IGNORECASE)
     
-    # Clean up extra whitespace and normalize case
-    name = ' '.join(name.split()).strip()
+    # Remove common abbreviations and standardize
+    abbreviation_replacements = {
+        r'\b&\b': 'and',
+        r'\btech\b': 'technology',
+        r'\bsystems?\b': 'system',
+        r'\benergy\b': '',  # Make energy optional for matching
+        r'\bsolutions?\b': '',  # Make solutions optional for matching
+        r'\bindustries\b': '',  # Make industries optional for matching
+        r'\btechnologies\b': 'technology',
+        r'\bservices?\b': '',  # Make services optional for matching
+    }
+    
+    # Apply abbreviation replacements
+    for pattern, replacement in abbreviation_replacements.items():
+        name = re.sub(pattern, replacement, name, flags=re.IGNORECASE)
+    
+    # Remove extra whitespace, punctuation, and normalize case
+    name = re.sub(r'[^\w\s]', '', name)  # Remove punctuation
+    name = ' '.join(name.split()).strip().lower()
     
     return name
+
+
+def extract_core_company_name(company_name):
+    """Extract the core company name for advanced semantic matching"""
+    if pd.isna(company_name) or company_name == '':
+        return ''
+    
+    name = str(company_name).strip()
+    
+    # Handle specific patterns like "Techtronic Industries - TTI"
+    if ' - ' in name:
+        parts = name.split(' - ')
+        # Take the part that's likely the main name (usually the longer one)
+        name = max(parts, key=len).strip()
+    
+    # Handle patterns with parentheses
+    name = re.sub(r'\([^)]*\)', '', name).strip()
+    
+    # Apply basic normalization
+    name = normalize_company_name(name)
+    
+    return name
+
 
 def extract_jobstreet_companies(df):
     """Extract unique company names and their job counts from JobStreet data"""
@@ -201,6 +325,7 @@ def extract_jobstreet_companies(df):
     
     return company_counts
 
+
 def extract_linkedin_companies(df):
     """Extract unique company names and their stakeholder counts from LinkedIn data"""
     if 'Current Company' not in df.columns:
@@ -213,64 +338,104 @@ def extract_linkedin_companies(df):
     
     return company_counts
 
-def match_companies_enhanced(jobstreet_companies, linkedin_companies, threshold=75):
-    """Enhanced company matching using fuzzy matching with name normalization"""
+
+# Cache the model to avoid re-loading it every time the app re-runs
+@st.cache_resource
+def get_sentence_transformer():
+    """Load and cache the Sentence-Transformer model."""
+    if SENTENCE_TRANSFORMERS_AVAILABLE:
+        return SentenceTransformer('all-MiniLM-L6-v2')
+    else:
+        return None
+
+
+def match_companies_semantic(jobstreet_companies, linkedin_companies, threshold_score=0.75):
+    """
+    Enhanced semantic company matching with multiple normalization approaches.
+    
+    Args:
+        jobstreet_companies (dict): A dictionary of company names from JobStreet.
+        linkedin_companies (dict): A dictionary of company names from LinkedIn.
+        threshold_score (float): The minimum semantic similarity score (0-1) to consider a match.
+        
+    Returns:
+        dict: A dictionary mapping JobStreet company names to a tuple of 
+              (LinkedIn company name, score).
+    """
+    if not SENTENCE_TRANSFORMERS_AVAILABLE:
+        return {}
+        
+    model = get_sentence_transformer()
+    if model is None:
+        return {}
+    
+    # Get unique company names and ensure they are not empty
+    js_names = [name for name in jobstreet_companies.keys() if name and isinstance(name, str)]
+    li_names = [name for name in linkedin_companies.keys() if name and isinstance(name, str)]
+    
+    if not js_names or not li_names:
+        return {}
+
     matches = {}
     
-    # Create normalized mapping for LinkedIn companies
-    linkedin_normalized = {}
-    for li_company in linkedin_companies.keys():
-        normalized = normalize_company_name(li_company)
-        if normalized:
-            linkedin_normalized[li_company] = normalized
-    
-    for js_company in jobstreet_companies.keys():
-        js_normalized = normalize_company_name(js_company)
-        if not js_normalized:
-            continue
-            
+    # Try multiple matching approaches with different normalization levels
+    for js_name in js_names:
         best_match = None
         best_score = 0
         
-        # Try exact normalized match first
-        for li_company, li_normalized in linkedin_normalized.items():
-            if js_normalized.lower() == li_normalized.lower():
-                matches[js_company] = (li_company, 100)
-                best_match = li_company
-                break
+        # Approach 1: Raw company names
+        js_embedding = model.encode([js_name], convert_to_tensor=True)
+        li_embeddings = model.encode(li_names, convert_to_tensor=True)
+        cosine_scores = util.cos_sim(js_embedding, li_embeddings)[0]
         
-        # If no exact match, use fuzzy matching on both original and normalized names
-        if not best_match:
-            # Test against original company names
-            match_result = process.extractOne(
-                js_company, 
-                linkedin_companies.keys(),
-                scorer=fuzz.ratio
-            )
+        for j, li_name in enumerate(li_names):
+            score = cosine_scores[j].item()
+            if score > best_score:
+                best_score = score
+                best_match = li_name
+        
+        # Approach 2: Normalized company names
+        js_normalized = normalize_company_name(js_name)
+        if js_normalized:
+            li_normalized = [normalize_company_name(name) for name in li_names]
+            li_normalized = [name for name in li_normalized if name]  # Remove empty strings
             
-            if match_result and match_result[1] >= threshold:
-                best_match = match_result[0]
-                best_score = match_result[1]
+            if li_normalized:
+                js_norm_embedding = model.encode([js_normalized], convert_to_tensor=True)
+                li_norm_embeddings = model.encode(li_normalized, convert_to_tensor=True)
+                norm_cosine_scores = util.cos_sim(js_norm_embedding, li_norm_embeddings)[0]
+                
+                for j, (norm_name, orig_name) in enumerate(zip(li_normalized, li_names)):
+                    if j < len(norm_cosine_scores):
+                        score = norm_cosine_scores[j].item()
+                        if score > best_score:
+                            best_score = score
+                            best_match = orig_name
+        
+        # Approach 3: Core company names (handles complex cases like "Techtronic Industries - TTI")
+        js_core = extract_core_company_name(js_name)
+        if js_core:
+            li_core = [extract_core_company_name(name) for name in li_names]
+            li_core = [name for name in li_core if name]  # Remove empty strings
             
-            # Also test against normalized names
-            normalized_match = process.extractOne(
-                js_normalized,
-                list(linkedin_normalized.values()),
-                scorer=fuzz.ratio
-            )
+            if li_core:
+                js_core_embedding = model.encode([js_core], convert_to_tensor=True)
+                li_core_embeddings = model.encode(li_core, convert_to_tensor=True)
+                core_cosine_scores = util.cos_sim(js_core_embedding, li_core_embeddings)[0]
+                
+                for j, (core_name, orig_name) in enumerate(zip(li_core, li_names)):
+                    if j < len(core_cosine_scores):
+                        score = core_cosine_scores[j].item()
+                        if score > best_score:
+                            best_score = score
+                            best_match = orig_name
+        
+        # Record match if it exceeds threshold
+        if best_score >= threshold_score and best_match:
+            matches[js_name] = (best_match, round(best_score * 100))
             
-            if normalized_match and normalized_match[1] > best_score and normalized_match[1] >= threshold:
-                # Find the original company name for this normalized match
-                for li_company, li_normalized in linkedin_normalized.items():
-                    if li_normalized == normalized_match[0]:
-                        best_match = li_company
-                        best_score = normalized_match[1]
-                        break
-            
-            if best_match:
-                matches[js_company] = (best_match, best_score)
-    
     return matches
+
 
 def get_linkedin_employees_for_company(linkedin_df, company_name):
     """Get all LinkedIn employees for a specific company"""
@@ -278,116 +443,149 @@ def get_linkedin_employees_for_company(linkedin_df, company_name):
         return pd.DataFrame()
     
     # Filter employees for the specific company
-    company_employees = linkedin_df[linkedin_df['Current Company'] == company_name].copy()
-    
-    # Clean the data
-    company_employees = company_employees.dropna(subset=['First Name', 'Current Role'])
-    
-    return company_employees
+    return linkedin_df[linkedin_df['Current Company'] == company_name].copy()
 
-def process_jobstreet_data_enhanced(jobstreet_df, linkedin_df, matches, linkedin_companies):
-    """Enhanced processing with employee detail mapping"""
+
+def match_companies_enhanced(jobstreet_companies, linkedin_companies, threshold=75):
+    """
+    Enhanced company matching using available matching methods
+    """
+    matches = {}
     
-    # Create a copy of the original data and add new columns
-    processed_df = jobstreet_df.copy()
+    # First try semantic matching if available
+    if SENTENCE_TRANSFORMERS_AVAILABLE:
+        semantic_threshold = threshold / 100.0
+        semantic_matches = match_companies_semantic(jobstreet_companies, linkedin_companies, semantic_threshold)
+        matches.update(semantic_matches)
     
-    # Add new columns for employee details
-    processed_df['First Name'] = ''
-    processed_df['Title'] = ''
-    processed_df['Email'] = ''
+    # For unmatched companies, try fuzzy matching if available
+    unmatched_js = [company for company in jobstreet_companies.keys() if company not in matches]
     
-    # Remove any existing timestamp columns
-    timestamp_cols = [col for col in processed_df.columns if 'extracted' in col.lower() or 'timestamp' in col.lower()]
-    if timestamp_cols:
-        processed_df = processed_df.drop(columns=timestamp_cols)
+    if FUZZYWUZZY_AVAILABLE and unmatched_js:
+        for js_company in unmatched_js:
+            # Normalize company names for better fuzzy matching
+            normalized_js = normalize_company_name(js_company)
+            
+            best_match = None
+            best_score = 0
+            
+            for li_company in linkedin_companies.keys():
+                normalized_li = normalize_company_name(li_company)
+                
+                # Try different fuzzy matching approaches
+                scores = [
+                    fuzz.ratio(normalized_js.lower(), normalized_li.lower()),
+                    fuzz.partial_ratio(normalized_js.lower(), normalized_li.lower()),
+                    fuzz.token_sort_ratio(normalized_js.lower(), normalized_li.lower()),
+                    fuzz.token_set_ratio(normalized_js.lower(), normalized_li.lower())
+                ]
+                
+                max_score = max(scores)
+                
+                if max_score > best_score and max_score >= threshold:
+                    best_score = max_score
+                    best_match = li_company
+            
+            if best_match:
+                matches[js_company] = (best_match, best_score)
+    elif not FUZZYWUZZY_AVAILABLE and unmatched_js:
+        # Fallback to basic string matching
+        for js_company in unmatched_js:
+            normalized_js = normalize_company_name(js_company).lower()
+            
+            for li_company in linkedin_companies.keys():
+                normalized_li = normalize_company_name(li_company).lower()
+                
+                # Simple exact match after normalization
+                if normalized_js == normalized_li and normalized_js:
+                    matches[js_company] = (li_company, 100)
+                    break
+                # Simple substring match
+                elif normalized_js in normalized_li or normalized_li in normalized_js:
+                    if len(normalized_js) > 3 and len(normalized_li) > 3:  # Avoid very short matches
+                        matches[js_company] = (li_company, 80)
     
-    # Group companies and process them one by one
+    return matches
+
+
+def process_jobstreet_data_enhanced(jobstreet_df, linkedin_df, company_matches, linkedin_companies):
+    """
+    Process JobStreet data and create expanded dataset with LinkedIn employee information
+    """
     result_rows = []
-    companies_processed = set()
     
-    for index, row in processed_df.iterrows():
-        company = row['Company']
+    for _, js_row in jobstreet_df.iterrows():
+        js_company = js_row['Company']
         
-        if company not in companies_processed:
-            companies_processed.add(company)
+        # Check if this company has a match
+        if js_company in company_matches:
+            matched_li_company, match_score = company_matches[js_company]
             
-            # Get all rows for this company
-            company_rows = processed_df[processed_df['Company'] == company].copy()
+            # Get all employees for this LinkedIn company
+            employees = get_linkedin_employees_for_company(linkedin_df, matched_li_company)
             
-            # Check if this company has a match in LinkedIn data
-            if company in matches:
-                linkedin_company, match_score = matches[company]
-                
-                # Get LinkedIn employees for this company
-                linkedin_employees = get_linkedin_employees_for_company(linkedin_df, linkedin_company)
-                
-                if not linkedin_employees.empty:
-                    employee_list = linkedin_employees.to_dict('records')
-                    
-                    # Add original JobStreet rows first, populate with employee data if available
-                    for i, (_, company_row) in enumerate(company_rows.iterrows()):
-                        row_to_add = company_row.copy()
-                        
-                        # If we have LinkedIn employee data, populate the first rows
-                        if i < len(employee_list):
-                            employee = employee_list[i]
-                            row_to_add['First Name'] = employee.get('First Name', '')
-                            row_to_add['Title'] = employee.get('Current Role', '')
-                            row_to_add['Email'] = employee.get('Email', '')
-                        
-                        result_rows.append(row_to_add)
-                    
-                    # Calculate additional blank rows needed
-                    existing_rows = len(company_rows)
-                    total_employees = len(employee_list)
-                    blank_rows_needed = max(0, total_employees - existing_rows)
-                    
-                    # Add blank rows with employee data
-                    for i in range(blank_rows_needed):
-                        blank_row = pd.Series(index=processed_df.columns, dtype=object)
-                        blank_row['Job Title'] = ''
-                        blank_row['Company'] = company
-                        blank_row['Location'] = ''
-                        
-                        # Add employee data from LinkedIn
-                        employee_index = existing_rows + i
-                        if employee_index < len(employee_list):
-                            employee = employee_list[employee_index]
-                            blank_row['First Name'] = employee.get('First Name', '')
-                            blank_row['Title'] = employee.get('Current Role', '')
-                            blank_row['Email'] = employee.get('Email', '')
-                        else:
-                            blank_row['First Name'] = ''
-                            blank_row['Title'] = ''
-                            blank_row['Email'] = ''
-                        
-                        result_rows.append(blank_row)
-                else:
-                    # No LinkedIn employees found, just add original rows
-                    for _, company_row in company_rows.iterrows():
-                        result_rows.append(company_row)
+            if not employees.empty:
+                # Create a row for each employee
+                for _, employee in employees.iterrows():
+                    result_row = {
+                        'Job Title': js_row['Job Title'],
+                        'Company': js_row['Company'],
+                        'Location': js_row['Location'],
+                        'Name': employee.get('Name', ''),
+                        'First Name': employee.get('First Name', ''),
+                        "Stakeholder's position": employee.get('Current Role', ''),
+                        'Email': employee.get('Email', ''),
+                        'Match Score': match_score,
+                        'LinkedIn Company': matched_li_company
+                    }
+                    result_rows.append(result_row)
             else:
-                # No match found, just add original rows
-                for _, company_row in company_rows.iterrows():
-                    result_rows.append(company_row)
+                # No employees found, add original row with empty employee fields
+                result_row = {
+                    'Job Title': js_row['Job Title'],
+                    'Company': js_row['Company'],
+                    'Location': js_row['Location'],
+                    'Name': '',
+                    'First Name': '',
+                    "Stakeholder's position": '',
+                    'Email': '',
+                    'Match Score': match_score,
+                    'LinkedIn Company': matched_li_company
+                }
+                result_rows.append(result_row)
+        else:
+            # No company match found, add original row with empty employee fields
+            result_row = {
+                'Job Title': js_row['Job Title'],
+                'Company': js_row['Company'],
+                'Location': js_row['Location'],
+                'Name': '',
+                'First Name': '',
+                "Stakeholder's position": '',
+                'Email': '',
+                'Match Score': 0,
+                'LinkedIn Company': ''
+            }
+            result_rows.append(result_row)
     
-    # Create new dataframe from result rows
-    if result_rows:
-        final_df = pd.DataFrame(result_rows).reset_index(drop=True)
-    else:
-        final_df = processed_df.iloc[0:0].copy()  # Empty dataframe with same columns
-    
-    return final_df
+    # Create DataFrame and apply duplicate blanking
+    processed_df = pd.DataFrame(result_rows)
+    return apply_duplicate_blanking(processed_df)
 
-@st.cache_data
+
 def convert_df_to_excel(df):
-    """Convert dataframe to Excel format for download"""
+    """Convert DataFrame to Excel bytes for download"""
     output = io.BytesIO()
+    
+    # Create the final output with only required columns
+    final_columns = ['Job Title', 'Company', 'Location', 'Name', 'First Name', "Stakeholder's position", 'Email']
+    final_df = df[final_columns].copy()
+    
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Processed_Data')
+        final_df.to_excel(writer, index=False, sheet_name='Processed Data')
         
         # Auto-adjust column widths
-        worksheet = writer.sheets['Processed_Data']
+        worksheet = writer.sheets['Processed Data']
         for column in worksheet.columns:
             max_length = 0
             column_letter = column[0].column_letter
@@ -400,8 +598,9 @@ def convert_df_to_excel(df):
             adjusted_width = min(max_length + 2, 50)
             worksheet.column_dimensions[column_letter].width = adjusted_width
     
-    processed_data = output.getvalue()
-    return processed_data
+    output.seek(0)
+    return output.getvalue()
+
 
 if __name__ == "__main__":
     main()
